@@ -938,7 +938,8 @@ bool ProfileManager::SaveConfiguration()
     /*-----------------------------------------------------*\
     | Write controller data for each controller             |
     \*-----------------------------------------------------*/
-    std::size_t new_saved_controller_index = 0;
+    std::size_t                     new_saved_controller_index = 0;
+    std::vector<RGBController *>    saved_local_controllers;
 
     for(std::size_t controller_index = 0; controller_index < local_controllers.size(); controller_index++)
     {
@@ -966,6 +967,8 @@ bool ProfileManager::SaveConfiguration()
             \*---------------------------------------------*/
             profile_json["controllers"][new_saved_controller_index] = RGBController::GetDeviceDescriptionJSON(local_controllers[controller_index]);
             new_saved_controller_index++;
+
+            saved_local_controllers.push_back(local_controllers[controller_index]);
         }
     }
 
@@ -978,9 +981,17 @@ bool ProfileManager::SaveConfiguration()
     {
         bool found = false;
 
-        for(std::size_t controller_index = 0; controller_index < local_controllers.size(); controller_index++)
+        /*-------------------------------------------------*\
+        | An old entry is replaced when the same device was |
+        | just saved above.  This used to require an exact  |
+        | match including the full mode list and version,   |
+        | so every OpenRGB update that changed a device's   |
+        | modes left a stale duplicate behind, and the      |
+        | stale entry could win when loading               |
+        \*-------------------------------------------------*/
+        for(std::size_t controller_index = 0; controller_index < saved_local_controllers.size(); controller_index++)
         {
-            if(RGBController::CompareControllers(manually_configured_rgb_controllers[old_saved_controller_index], local_controllers[controller_index]))
+            if(SavedControllerMatches(manually_configured_rgb_controllers[old_saved_controller_index], saved_local_controllers[controller_index], false))
             {
                 found = true;
                 break;
@@ -1282,6 +1293,114 @@ bool ProfileManager::LoadAutoProfile(std::string setting_name)
     }
 }
 
+bool ProfileManager::SavedControllerMatches
+    (
+    RGBController*  saved_controller,
+    RGBController*  live_controller,
+    bool            check_version
+    )
+{
+    /*---------------------------------------------------------*\
+    | Do not compare location string for HID devices, as the    |
+    | location string may change between runs as devices are    |
+    | connected and disconnected. Also do not compare the I2C   |
+    | bus number, since it is not persistent across reboots     |
+    | on Linux - strip the I2C number and compare only address. |
+    \*---------------------------------------------------------*/
+    bool location_check;
+
+    if(live_controller->GetLocation().find("HID: ") == 0)
+    {
+        location_check = true;
+    }
+    else if(live_controller->GetLocation().find("I2C: ") == 0)
+    {
+        std::size_t loc = live_controller->GetLocation().rfind(", ");
+        if(loc == std::string::npos)
+        {
+            location_check = false;
+        }
+        else
+        {
+            std::string i2c_address = live_controller->GetLocation().substr(loc + 2);
+            location_check = saved_controller->GetLocation().find(i2c_address) != std::string::npos;
+        }
+    }
+    else
+    {
+        location_check = saved_controller->GetLocation() == live_controller->GetLocation();
+    }
+
+    /*-------------------------------------------------*\
+    | Do not check device name if manually configured   |
+    \*-------------------------------------------------*/
+    bool    check_device_name   = true;
+
+    if((live_controller->GetFlags()  & CONTROLLER_FLAG_MANUALLY_CONFIGURED_NAME)
+    || (saved_controller->GetFlags() & CONTROLLER_FLAG_MANUALLY_CONFIGURED_NAME))
+    {
+        check_device_name = false;
+    }
+
+    return(                       (saved_controller->GetDeviceType()    == live_controller->GetDeviceType() )
+         &&(!check_device_name || (saved_controller->GetName()          == live_controller->GetName()       ))
+         &&                       (saved_controller->GetDescription()   == live_controller->GetDescription())
+         &&(!check_version     || (saved_controller->GetVersion()       == live_controller->GetVersion()    ))
+         &&                       (saved_controller->GetSerial()        == live_controller->GetSerial()     )
+         &&                       (location_check                       == true                             ));
+}
+
+RGBController* ProfileManager::FindSavedController
+    (
+    std::vector<RGBController*>&    saved_controllers,
+    RGBController*                  live_controller
+    )
+{
+    /*-----------------------------------------------------*\
+    | First look for an exact match, including the          |
+    | firmware/version string                               |
+    \*-----------------------------------------------------*/
+    for(std::size_t saved_idx = 0; saved_idx < saved_controllers.size(); saved_idx++)
+    {
+        if(SavedControllerMatches(saved_controllers[saved_idx], live_controller, true))
+        {
+            return(saved_controllers[saved_idx]);
+        }
+    }
+
+    /*-----------------------------------------------------*\
+    | Otherwise accept a match that only differs in the     |
+    | version string, but only if it is unambiguous.  The   |
+    | version changes with firmware/BIOS updates and, in    |
+    | older builds, could contain garbage when the read     |
+    | failed at boot, which made saved zone sizes and       |
+    | profiles stop applying until a rescan                 |
+    \*-----------------------------------------------------*/
+    RGBController*  candidate       = NULL;
+    unsigned int    candidate_count = 0;
+
+    for(std::size_t saved_idx = 0; saved_idx < saved_controllers.size(); saved_idx++)
+    {
+        if(SavedControllerMatches(saved_controllers[saved_idx], live_controller, false))
+        {
+            candidate = saved_controllers[saved_idx];
+            candidate_count++;
+        }
+    }
+
+    if(candidate_count == 1)
+    {
+        LOG_INFO("[ProfileManager] Using saved data for %s despite version mismatch (saved \"%s\", detected \"%s\")",
+                 live_controller->GetName().c_str(),
+                 candidate->GetVersion().c_str(),
+                 live_controller->GetVersion().c_str());
+
+        return(candidate);
+    }
+
+    return(NULL);
+}
+
 bool ProfileManager::LoadControllerFromListWithOptions
     (
     std::vector<RGBController*>&    profile_controllers,
@@ -1290,231 +1409,200 @@ bool ProfileManager::LoadControllerFromListWithOptions
     bool                            load_state
     )
 {
-    for(std::size_t temp_index = 0; temp_index < profile_controllers.size(); temp_index++)
+    /*-----------------------------------------------------*\
+    | Find the saved entry for this device                  |
+    \*-----------------------------------------------------*/
+    RGBController* profile_controller = FindSavedController(profile_controllers, load_controller);
+
+    if(profile_controller != NULL)
     {
-        RGBController *profile_controller = profile_controllers[temp_index];
-
-        /*---------------------------------------------------------*\
-        | Do not compare location string for HID devices, as the    |
-        | location string may change between runs as devices are    |
-        | connected and disconnected. Also do not compare the I2C   |
-        | bus number, since it is not persistent across reboots     |
-        | on Linux - strip the I2C number and compare only address. |
-        \*---------------------------------------------------------*/
-        bool location_check;
-
-        if(load_controller->GetLocation().find("HID: ") == 0)
+        /*---------------------------------------------*\
+        | Update device configuration if requested      |
+        \*---------------------------------------------*/
+        if(load_configuration)
         {
-            location_check = true;
-        }
-        else if(load_controller->GetLocation().find("I2C: ") == 0)
-        {
-            std::size_t loc = load_controller->GetLocation().rfind(", ");
-            if(loc == std::string::npos)
+            /*-----------------------------------------*\
+            | Load device-specific configuration        |
+            \*-----------------------------------------*/
+            nlohmann::json configuration_json;
+            JsonUtils::JsonParse(profile_controller->configuration, configuration_json);
+
+            load_controller->ConfigureDevice(profile_controller->flags, profile_controller->display_name);
+            load_controller->SetDeviceSpecificConfiguration(configuration_json["configuration"]);
+
+            /*-----------------------------------------*\
+            | Load zone configuration                   |
+            \*-----------------------------------------*/
+            if(profile_controller->zones.size() == load_controller->zones.size())
             {
-                location_check = false;
+                for(unsigned int zone_idx = 0; zone_idx < (unsigned int)profile_controller->zones.size(); zone_idx++)
+                {
+                    bool    check_zone_name = true;
+                    bool    check_zone_type = true;
+
+                    /*---------------------------------*\
+                    | Do not check zone name if         |
+                    | manually configured               |
+                    \*---------------------------------*/
+                    if((profile_controller->GetZoneFlags(zone_idx) & ZONE_FLAG_MANUALLY_CONFIGURED_NAME)
+                    || (load_controller->GetZoneFlags(zone_idx) & ZONE_FLAG_MANUALLY_CONFIGURABLE_NAME))
+                    {
+                        check_zone_name = false;
+                    }
+
+                    /*---------------------------------*\
+                    | Do not check zone type if         |
+                    | manually configured               |
+                    \*---------------------------------*/
+                    if((profile_controller->GetZoneFlags(zone_idx) & ZONE_FLAG_MANUALLY_CONFIGURED_TYPE)
+                    || (load_controller->GetZoneFlags(zone_idx) & ZONE_FLAG_MANUALLY_CONFIGURABLE_TYPE))
+                    {
+                        check_zone_type = false;
+                    }
+
+                    if((!check_zone_name || (profile_controller->GetZoneName(zone_idx)      == load_controller->GetZoneName(zone_idx)     ))
+                    && (!check_zone_type || (profile_controller->GetZoneType(zone_idx)      == load_controller->GetZoneType(zone_idx)     ))
+                    &&                      (profile_controller->GetZoneLEDsMin(zone_idx)   == load_controller->GetZoneLEDsMin(zone_idx)  )
+                    &&                      (profile_controller->GetZoneLEDsMax(zone_idx)   == load_controller->GetZoneLEDsMax(zone_idx)  ))
+                    {
+                        load_controller->ConfigureZone(zone_idx, profile_controller->zones[zone_idx]);
+
+                        if(profile_controller->GetZoneFlags(zone_idx) & ZONE_FLAG_MANUALLY_CONFIGURED_SEGMENTS)
+                        {
+                            load_controller->zones[zone_idx].segments.clear();
+
+                            for(unsigned int segment_idx = 0; segment_idx < (unsigned int)profile_controller->zones[zone_idx].segments.size(); segment_idx++)
+                            {
+                                load_controller->zones[zone_idx].segments.push_back(profile_controller->zones[zone_idx].segments[segment_idx]);
+                            }
+                        }
+                    }
+
+                    load_controller->SetDeviceSpecificZoneConfiguration(zone_idx, configuration_json["zones"][zone_idx]["configuration"]);
+                }
+            }
+        }
+
+        /*---------------------------------------------*\
+        | Update settings if requested                  |
+        \*---------------------------------------------*/
+        if(load_state)
+        {
+            /*-----------------------------------------*\
+            | Load modes by name.  Matching by index    |
+            | only worked when the mode list was        |
+            | identical; whenever an OpenRGB update     |
+            | added or reordered modes for a device,    |
+            | the whole mode state of saved profiles    |
+            | was silently ignored                      |
+            \*-----------------------------------------*/
+            bool active_mode_found = false;
+
+            for(unsigned int profile_mode_index = 0; profile_mode_index < (unsigned int)profile_controller->modes.size(); profile_mode_index++)
+            {
+                for(unsigned int mode_index = 0; mode_index < (unsigned int)load_controller->modes.size(); mode_index++)
+                {
+                    if((profile_controller->GetModeName(profile_mode_index)            == load_controller->GetModeName(mode_index)         )
+                     &&(profile_controller->GetModeFlags(profile_mode_index)           == load_controller->GetModeFlags(mode_index)        )
+                     &&(profile_controller->GetModeSpeedMin(profile_mode_index)        == load_controller->GetModeSpeedMin(mode_index)     )
+                     &&(profile_controller->GetModeSpeedMax(profile_mode_index)        == load_controller->GetModeSpeedMax(mode_index)     )
+                     &&(profile_controller->GetModeBrightnessMin(profile_mode_index)   == load_controller->GetModeBrightnessMin(mode_index))
+                     &&(profile_controller->GetModeBrightnessMax(profile_mode_index)   == load_controller->GetModeBrightnessMax(mode_index))
+                     &&(profile_controller->GetModeColorsMin(profile_mode_index)       == load_controller->GetModeColorsMin(mode_index)    )
+                     &&(profile_controller->GetModeColorsMax(profile_mode_index)       == load_controller->GetModeColorsMax(mode_index)    ))
+                    {
+                        load_controller->modes[mode_index].speed            = profile_controller->modes[profile_mode_index].speed;
+                        load_controller->modes[mode_index].brightness       = profile_controller->modes[profile_mode_index].brightness;
+                        load_controller->modes[mode_index].direction        = profile_controller->modes[profile_mode_index].direction;
+                        load_controller->modes[mode_index].color_mode       = profile_controller->modes[profile_mode_index].color_mode;
+
+                        load_controller->modes[mode_index].colors.resize(profile_controller->modes[profile_mode_index].colors.size());
+
+                        for(unsigned int mode_color_index = 0; mode_color_index < profile_controller->GetModeColorsCount(profile_mode_index); mode_color_index++)
+                        {
+                            load_controller->modes[mode_index].colors[mode_color_index] = profile_controller->modes[profile_mode_index].colors[mode_color_index];
+                        }
+
+                        if((int)profile_mode_index == profile_controller->active_mode)
+                        {
+                            load_controller->active_mode = (int)mode_index;
+                            active_mode_found            = true;
+                        }
+
+                        break;
+                    }
+                }
+            }
+
+            if(active_mode_found)
+            {
+                load_controller->UpdateMode();
             }
             else
             {
-                std::string i2c_address = load_controller->GetLocation().substr(loc + 2);
-                location_check = profile_controller->GetLocation().find(i2c_address) != std::string::npos;
+                LOG_WARNING("[ProfileManager] Saved active mode for %s is not available in this version, mode left unchanged", load_controller->GetName().c_str());
             }
-        }
-        else
-        {
-            location_check = profile_controller->GetLocation() == load_controller->GetLocation();
-        }
 
-        /*-------------------------------------------------*\
-        | Do not check zonedevice name if manually          |
-        | configured                                        |
-        \*-------------------------------------------------*/
-        bool    check_device_name   = true;
-
-        if((load_controller->GetFlags()    & CONTROLLER_FLAG_MANUALLY_CONFIGURED_NAME)
-        || (profile_controller->GetFlags() & CONTROLLER_FLAG_MANUALLY_CONFIGURED_NAME))
-        {
-            check_device_name = false;
-        }
-
-        /*-------------------------------------------------*\
-        | Test if saved controller data matches this        |
-        | controller                                        |
-        \*-------------------------------------------------*/
-        if(                       (profile_controller->GetDeviceType()    == load_controller->GetDeviceType() )
-         &&(!check_device_name || (profile_controller->GetName()          == load_controller->GetName()       ))
-         &&                       (profile_controller->GetDescription()   == load_controller->GetDescription())
-         &&                       (profile_controller->GetVersion()       == load_controller->GetVersion()    )
-         &&                       (profile_controller->GetSerial()        == load_controller->GetSerial()     )
-         &&                       (location_check                         == true                             ))
-        {
-            /*---------------------------------------------*\
-            | Update device configuration if requested      |
-            \*---------------------------------------------*/
-            if(load_configuration)
+            /*-----------------------------------------*\
+            | If color list matches, load all colors    |
+            \*-----------------------------------------*/
+            if(profile_controller->colors.size() == load_controller->colors.size())
             {
-                /*-----------------------------------------*\
-                | Load device-specific configuration        |
-                \*-----------------------------------------*/
-                nlohmann::json configuration_json;
-                JsonUtils::JsonParse(profile_controller->configuration, configuration_json);
-
-                load_controller->ConfigureDevice(profile_controller->flags, profile_controller->display_name);
-                load_controller->SetDeviceSpecificConfiguration(configuration_json["configuration"]);
-
-                /*-----------------------------------------*\
-                | Load zone configuration                   |
-                \*-----------------------------------------*/
-                if(profile_controller->zones.size() == load_controller->zones.size())
+                for(unsigned int color_index = 0; color_index < (unsigned int)profile_controller->colors.size(); color_index++)
                 {
-                    for(unsigned int zone_idx = 0; zone_idx < (unsigned int)profile_controller->zones.size(); zone_idx++)
+                    load_controller->colors[color_index] = profile_controller->colors[color_index];
+                }
+
+                load_controller->UpdateLEDs();
+            }
+
+            /*-----------------------------------------*\
+            | If zone mode list matches, load all zone  |
+            | modes                                     |
+            \*-----------------------------------------*/
+            if(profile_controller->GetZoneCount() == load_controller->GetZoneCount())
+            {
+                for(unsigned int zone_idx = 0; zone_idx < profile_controller->GetZoneCount(); zone_idx++)
+                {
+                    if((profile_controller->GetZoneName(zone_idx)      == load_controller->GetZoneName(zone_idx)     )
+                     &&(profile_controller->GetZoneType(zone_idx)      == load_controller->GetZoneType(zone_idx)     )
+                     &&(profile_controller->GetZoneLEDsMin(zone_idx)   == load_controller->GetZoneLEDsMin(zone_idx)  )
+                     &&(profile_controller->GetZoneLEDsMax(zone_idx)   == load_controller->GetZoneLEDsMax(zone_idx)  )
+                     &&(profile_controller->GetZoneModeCount(zone_idx) == load_controller->GetZoneModeCount(zone_idx)))
                     {
-                        bool    check_zone_name = true;
-                        bool    check_zone_type = true;
-
-                        /*---------------------------------*\
-                        | Do not check zone name if         |
-                        | manually configured               |
-                        \*---------------------------------*/
-                        if((profile_controller->GetZoneFlags(zone_idx) & ZONE_FLAG_MANUALLY_CONFIGURED_NAME)
-                        || (load_controller->GetZoneFlags(zone_idx) & ZONE_FLAG_MANUALLY_CONFIGURABLE_NAME))
+                        for(unsigned int mode_index = 0; mode_index < profile_controller->GetZoneModeCount(zone_idx); mode_index++)
                         {
-                            check_zone_name = false;
-                        }
-
-                        /*---------------------------------*\
-                        | Do not check zone type if         |
-                        | manually configured               |
-                        \*---------------------------------*/
-                        if((profile_controller->GetZoneFlags(zone_idx) & ZONE_FLAG_MANUALLY_CONFIGURED_TYPE)
-                        || (load_controller->GetZoneFlags(zone_idx) & ZONE_FLAG_MANUALLY_CONFIGURABLE_TYPE))
-                        {
-                            check_zone_type = false;
-                        }
-
-                        if((!check_zone_name || (profile_controller->GetZoneName(zone_idx)      == load_controller->GetZoneName(zone_idx)     ))
-                        && (!check_zone_type || (profile_controller->GetZoneType(zone_idx)      == load_controller->GetZoneType(zone_idx)     ))
-                        &&                      (profile_controller->GetZoneLEDsMin(zone_idx)   == load_controller->GetZoneLEDsMin(zone_idx)  )
-                        &&                      (profile_controller->GetZoneLEDsMax(zone_idx)   == load_controller->GetZoneLEDsMax(zone_idx)  ))
-                        {
-                            load_controller->ConfigureZone(zone_idx, profile_controller->zones[zone_idx]);
-
-                            if(profile_controller->GetZoneFlags(zone_idx) & ZONE_FLAG_MANUALLY_CONFIGURED_SEGMENTS)
+                            if((profile_controller->GetZoneModeName(zone_idx, mode_index)          == load_controller->GetZoneModeName(zone_idx, mode_index)         )
+                             &&(profile_controller->GetZoneModeFlags(zone_idx, mode_index)         == load_controller->GetZoneModeFlags(zone_idx, mode_index)        )
+                             &&(profile_controller->GetZoneModeSpeedMin(zone_idx, mode_index)      == load_controller->GetZoneModeSpeedMin(zone_idx, mode_index)     )
+                             &&(profile_controller->GetZoneModeSpeedMax(zone_idx, mode_index)      == load_controller->GetZoneModeSpeedMax(zone_idx, mode_index)     )
+                             &&(profile_controller->GetZoneModeBrightnessMin(zone_idx, mode_index) == load_controller->GetZoneModeBrightnessMin(zone_idx, mode_index))
+                             &&(profile_controller->GetZoneModeBrightnessMax(zone_idx, mode_index) == load_controller->GetZoneModeBrightnessMax(zone_idx, mode_index))
+                             &&(profile_controller->GetZoneModeColorsMin(zone_idx, mode_index)     == load_controller->GetZoneModeColorsMin(zone_idx, mode_index)    )
+                             &&(profile_controller->GetZoneModeColorsMax(zone_idx, mode_index)     == load_controller->GetZoneModeColorsMax(zone_idx, mode_index)    ))
                             {
-                                load_controller->zones[zone_idx].segments.clear();
+                                load_controller->zones[zone_idx].modes[mode_index].speed        = profile_controller->zones[zone_idx].modes[mode_index].speed;
+                                load_controller->zones[zone_idx].modes[mode_index].brightness   = profile_controller->zones[zone_idx].modes[mode_index].brightness;
+                                load_controller->zones[zone_idx].modes[mode_index].direction    = profile_controller->zones[zone_idx].modes[mode_index].direction;
+                                load_controller->zones[zone_idx].modes[mode_index].color_mode   = profile_controller->zones[zone_idx].modes[mode_index].color_mode;
 
-                                for(unsigned int segment_idx = 0; segment_idx < (unsigned int)profile_controller->zones[zone_idx].segments.size(); segment_idx++)
+                                load_controller->zones[zone_idx].modes[mode_index].colors.resize(profile_controller->zones[zone_idx].modes[mode_index].colors.size());
+
+                                for(unsigned int mode_color_index = 0; mode_color_index < profile_controller->GetZoneModeColorsCount(zone_idx, mode_index); mode_color_index++)
                                 {
-                                    load_controller->zones[zone_idx].segments.push_back(profile_controller->zones[zone_idx].segments[segment_idx]);
+                                    load_controller->zones[zone_idx].modes[mode_index].colors[mode_color_index] = profile_controller->zones[zone_idx].modes[mode_index].colors[mode_color_index];
                                 }
                             }
                         }
 
-                        load_controller->SetDeviceSpecificZoneConfiguration(zone_idx, configuration_json["zones"][zone_idx]["configuration"]);
+                        load_controller->SetZoneActiveMode(zone_idx, profile_controller->GetZoneActiveMode(zone_idx));
+                        load_controller->UpdateZoneMode(zone_idx);
                     }
                 }
             }
-
-            /*---------------------------------------------*\
-            | Update settings if requested                  |
-            \*---------------------------------------------*/
-            if(load_state)
-            {
-                /*-----------------------------------------*\
-                | If mode list matches, load all modes      |
-                \*-----------------------------------------*/
-                if(profile_controller->modes.size() == load_controller->modes.size())
-                {
-                    for(unsigned int mode_index = 0; mode_index < (unsigned int)profile_controller->modes.size(); mode_index++)
-                    {
-                        if((profile_controller->GetModeName(mode_index)            == load_controller->GetModeName(mode_index)         )
-                         &&(profile_controller->GetModeFlags(mode_index)           == load_controller->GetModeFlags(mode_index)        )
-                         &&(profile_controller->GetModeSpeedMin(mode_index)        == load_controller->GetModeSpeedMin(mode_index)     )
-                         &&(profile_controller->GetModeSpeedMax(mode_index)        == load_controller->GetModeSpeedMax(mode_index)     )
-                         &&(profile_controller->GetModeBrightnessMin(mode_index)   == load_controller->GetModeBrightnessMin(mode_index))
-                         &&(profile_controller->GetModeBrightnessMax(mode_index)   == load_controller->GetModeBrightnessMax(mode_index))
-                         &&(profile_controller->GetModeColorsMin(mode_index)       == load_controller->GetModeColorsMin(mode_index)    )
-                         &&(profile_controller->GetModeColorsMax(mode_index)       == load_controller->GetModeColorsMax(mode_index)    ))
-                        {
-                            load_controller->modes[mode_index].speed            = profile_controller->modes[mode_index].speed;
-                            load_controller->modes[mode_index].brightness       = profile_controller->modes[mode_index].brightness;
-                            load_controller->modes[mode_index].direction        = profile_controller->modes[mode_index].direction;
-                            load_controller->modes[mode_index].color_mode       = profile_controller->modes[mode_index].color_mode;
-
-                            load_controller->modes[mode_index].colors.resize(profile_controller->modes[mode_index].colors.size());
-
-                            for(unsigned int mode_color_index = 0; mode_color_index < profile_controller->GetModeColorsCount(mode_index); mode_color_index++)
-                            {
-                                load_controller->modes[mode_index].colors[mode_color_index] = profile_controller->modes[mode_index].colors[mode_color_index];
-                            }
-                        }
-                    }
-
-                    load_controller->active_mode = profile_controller->active_mode;
-                    load_controller->UpdateMode();
-                }
-
-                /*-----------------------------------------*\
-                | If color list matches, load all colors    |
-                \*-----------------------------------------*/
-                if(profile_controller->colors.size() == load_controller->colors.size())
-                {
-                    for(unsigned int color_index = 0; color_index < (unsigned int)profile_controller->colors.size(); color_index++)
-                    {
-                        load_controller->colors[color_index] = profile_controller->colors[color_index];
-                    }
-
-                    load_controller->UpdateLEDs();
-                }
-
-                /*-----------------------------------------*\
-                | If zone mode list matches, load all zone  |
-                | modes                                     |
-                \*-----------------------------------------*/
-                if(profile_controller->GetZoneCount() == load_controller->GetZoneCount())
-                {
-                    for(unsigned int zone_idx = 0; zone_idx < profile_controller->GetZoneCount(); zone_idx++)
-                    {
-                        if((profile_controller->GetZoneName(zone_idx)      == load_controller->GetZoneName(zone_idx)     )
-                         &&(profile_controller->GetZoneType(zone_idx)      == load_controller->GetZoneType(zone_idx)     )
-                         &&(profile_controller->GetZoneLEDsMin(zone_idx)   == load_controller->GetZoneLEDsMin(zone_idx)  )
-                         &&(profile_controller->GetZoneLEDsMax(zone_idx)   == load_controller->GetZoneLEDsMax(zone_idx)  )
-                         &&(profile_controller->GetZoneModeCount(zone_idx) == load_controller->GetZoneModeCount(zone_idx)))
-                        {
-                            for(unsigned int mode_index = 0; mode_index < profile_controller->GetZoneModeCount(zone_idx); mode_index++)
-                            {
-                                if((profile_controller->GetZoneModeName(zone_idx, mode_index)          == load_controller->GetZoneModeName(zone_idx, mode_index)         )
-                                 &&(profile_controller->GetZoneModeFlags(zone_idx, mode_index)         == load_controller->GetZoneModeFlags(zone_idx, mode_index)        )
-                                 &&(profile_controller->GetZoneModeSpeedMin(zone_idx, mode_index)      == load_controller->GetZoneModeSpeedMin(zone_idx, mode_index)     )
-                                 &&(profile_controller->GetZoneModeSpeedMax(zone_idx, mode_index)      == load_controller->GetZoneModeSpeedMax(zone_idx, mode_index)     )
-                                 &&(profile_controller->GetZoneModeBrightnessMin(zone_idx, mode_index) == load_controller->GetZoneModeBrightnessMin(zone_idx, mode_index))
-                                 &&(profile_controller->GetZoneModeBrightnessMax(zone_idx, mode_index) == load_controller->GetZoneModeBrightnessMax(zone_idx, mode_index))
-                                 &&(profile_controller->GetZoneModeColorsMin(zone_idx, mode_index)     == load_controller->GetZoneModeColorsMin(zone_idx, mode_index)    )
-                                 &&(profile_controller->GetZoneModeColorsMax(zone_idx, mode_index)     == load_controller->GetZoneModeColorsMax(zone_idx, mode_index)    ))
-                                {
-                                    load_controller->zones[zone_idx].modes[mode_index].speed        = profile_controller->zones[zone_idx].modes[mode_index].speed;
-                                    load_controller->zones[zone_idx].modes[mode_index].brightness   = profile_controller->zones[zone_idx].modes[mode_index].brightness;
-                                    load_controller->zones[zone_idx].modes[mode_index].direction    = profile_controller->zones[zone_idx].modes[mode_index].direction;
-                                    load_controller->zones[zone_idx].modes[mode_index].color_mode   = profile_controller->zones[zone_idx].modes[mode_index].color_mode;
-
-                                    load_controller->zones[zone_idx].modes[mode_index].colors.resize(profile_controller->zones[zone_idx].modes[mode_index].colors.size());
-
-                                    for(unsigned int mode_color_index = 0; mode_color_index < profile_controller->GetZoneModeColorsCount(zone_idx, mode_index); mode_color_index++)
-                                    {
-                                        load_controller->zones[zone_idx].modes[mode_index].colors[mode_color_index] = profile_controller->zones[zone_idx].modes[mode_index].colors[mode_color_index];
-                                    }
-                                }
-                            }
-
-                            load_controller->SetZoneActiveMode(zone_idx, profile_controller->GetZoneActiveMode(zone_idx));
-                            load_controller->UpdateZoneMode(zone_idx);
-                        }
-                    }
-                }
-            }
-
-            return(true);
         }
+
+        return(true);
     }
 
     /*-----------------------------------------------------*\
@@ -1616,10 +1704,28 @@ bool ProfileManager::LoadProfileWithOptions
     | controller, search all saved controllers until a  |
     | match is found                                    |
     \*-------------------------------------------------*/
+    unsigned int matched_controllers = 0;
+
     for(std::size_t controller_index = 0; controller_index < controllers.size(); controller_index++)
     {
-        LoadControllerFromListWithOptions(active_rgb_controllers, controllers[controller_index], load_configuration, load_state);
+        if(LoadControllerFromListWithOptions(active_rgb_controllers, controllers[controller_index], load_configuration, load_state))
+        {
+            matched_controllers++;
+        }
+        else
+        {
+            LOG_WARNING("[ProfileManager] Profile \"%s\" has no saved data for device %s (%s), not applied%s",
+                        profile_name.c_str(),
+                        controllers[controller_index]->GetName().c_str(),
+                        controllers[controller_index]->GetLocation().c_str(),
+                        active_base_color_enabled ? ", base color used instead" : "");
+        }
     }
+
+    LOG_INFO("[ProfileManager] Profile \"%s\": applied to %u of %u devices",
+             profile_name.c_str(),
+             matched_controllers,
+             (unsigned int)controllers.size());
 
     /*-------------------------------------------------*\
     | Get plugin profile data                           |
@@ -1645,6 +1751,19 @@ bool ProfileManager::LoadProfileWithOptions
     if(server)
     {
         server->SendRequest_ProfileManager_ActiveProfileChanged(active_profile);
+    }
+
+    /*-----------------------------------------------------*\
+    | Previously this always returned true, so the CLI and  |
+    | log said "Profile loaded successfully" even when the  |
+    | profile matched none of the detected devices.  Report |
+    | failure when nothing was applied.                     |
+    \*-----------------------------------------------------*/
+    if((matched_controllers == 0) && !active_base_color_enabled)
+    {
+        LOG_ERROR("[ProfileManager] Profile \"%s\" did not match any detected device", profile_name.c_str());
+
+        return(false);
     }
 
     return(true);

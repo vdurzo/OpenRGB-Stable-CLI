@@ -73,6 +73,7 @@ public:
     std::string GetDeviceName();
     std::string GetSerialString();
     std::string GetDeviceVersion();
+    bool IsConfigTableValid() const;
 
     const std::vector<AuraDeviceInfo>& GetAuraDevices() const;
 
@@ -98,7 +99,8 @@ protected:
     std::vector<AuraDeviceInfo> device_info;
     std::string                 location;
     std::string                 name;
-    char                        version[16];
+    char                        version[17];
+    bool                        config_table_valid;
 
     void SendDirect
         (
@@ -110,4 +112,10 @@ protected:
 private:
     void GetConfigTable();
     void GetFirmwareVersion();
+    bool SendRequestAndReadReply
+        (
+        unsigned char   request,
+        unsigned char   expected_reply,
+        unsigned char*  reply_buf
+        );
 };

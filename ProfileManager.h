@@ -190,4 +190,17 @@ private:
     nlohmann::json              ReadProfileFileJSON(filesystem::path profile_filepath);
 
     void                        RenameLegacyProfile(std::string profile_name, bool sizes);
+
+    static bool                 SavedControllerMatches
+                                    (
+                                    RGBController*  saved_controller,
+                                    RGBController*  live_controller,
+                                    bool            check_version
+                                    );
+
+    static RGBController*       FindSavedController
+                                    (
+                                    std::vector<RGBController*>&    saved_controllers,
+                                    RGBController*                  live_controller
+                                    );
 };

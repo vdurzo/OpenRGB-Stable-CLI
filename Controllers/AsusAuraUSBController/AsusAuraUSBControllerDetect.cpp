@@ -154,6 +154,20 @@ DetectedControllers DetectAsusAuraUSBTerminal(hid_device_info* info, const std::
     if(dev)
     {
         AuraAddressableController* controller               = new AuraAddressableController(dev, info->path, name);
+
+        if(!controller->IsConfigTableValid())
+        {
+            /*---------------------------------------------*\
+            | The controller did not return its config      |
+            | table.  Discard it instead of registering a   |
+            | device with a bogus (empty) layout; the       |
+            | destructor closes the HID handle.  A rescan   |
+            | retries detection.                            |
+            \*---------------------------------------------*/
+            delete controller;
+            return(detected_controllers);
+        }
+
         RGBController_AuraUSB*     rgb_controller           = new RGBController_AuraUSB(controller);
 
         detected_controllers.push_back(rgb_controller);
@@ -173,6 +187,20 @@ DetectedControllers DetectAsusAuraUSBAddressable(hid_device_info* info, const st
     {
         DMIInfo                    dmi;
         AuraAddressableController* controller               = new AuraAddressableController(dev, info->path, "ASUS " + dmi.getMainboard() + " Addressable");
+
+        if(!controller->IsConfigTableValid())
+        {
+            /*---------------------------------------------*\
+            | The controller did not return its config      |
+            | table.  Discard it instead of registering a   |
+            | device with a bogus (empty) layout; the       |
+            | destructor closes the HID handle.  A rescan   |
+            | retries detection.                            |
+            \*---------------------------------------------*/
+            delete controller;
+            return(detected_controllers);
+        }
+
         RGBController_AuraUSB*     rgb_controller           = new RGBController_AuraUSB(controller);
 
         detected_controllers.push_back(rgb_controller);
@@ -194,6 +222,20 @@ DetectedControllers DetectAsusAuraUSBMotherboards(hid_device_info* info, const s
         {
             DMIInfo                      dmi;
             AuraMainboardController*     controller         = new AuraMainboardController(dev, info->path, "ASUS " + dmi.getMainboard());
+
+            if(!controller->IsConfigTableValid())
+            {
+                /*---------------------------------------------*\
+                | The controller did not return its config      |
+                | table.  Discard it instead of registering a   |
+                | device with a bogus (empty) layout; the       |
+                | destructor closes the HID handle.  A rescan   |
+                | retries detection.                            |
+                \*---------------------------------------------*/
+                delete controller;
+                return(detected_controllers);
+            }
+
             RGBController_AuraMainboard* rgb_controller     = new RGBController_AuraMainboard(controller);
 
             detected_controllers.push_back(rgb_controller);

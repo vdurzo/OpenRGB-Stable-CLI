@@ -14,6 +14,15 @@
 
 AuraMainboardController::AuraMainboardController(hid_device* dev_handle, const char* path, std::string dev_name) : AuraUSBController(dev_handle, path, dev_name), mode(AURA_MODE_DIRECT)
 {
+    /*-----------------------------------------------------*\
+    | Do not configure the device if the config table could |
+    | not be read; the detector discards this controller    |
+    \*-----------------------------------------------------*/
+    if(!config_table_valid)
+    {
+        return;
+    }
+
     unsigned char num_total_mainboard_leds  = config_table[0x1B];
     unsigned char num_rgb_headers           = config_table[0x1D];
     unsigned char num_addressable_headers   = config_table[0x02];

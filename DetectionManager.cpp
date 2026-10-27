@@ -13,6 +13,7 @@
 #include <chrono>
 #include "DebugTrace.h"
 #include <cctype>
+#include <cerrno>
 #include <cstdio>
 #include <set>
 #include "DetectionManager.h"
@@ -69,6 +70,175 @@ static void DebugTraceController(const char* tag, RGBController* controller)
 #ifdef __linux__
 #include <unistd.h>
 #endif
+
+/*---------------------------------------------------------*\
+| Permission watcher                                        |
+|                                                           |
+|   When OpenRGB runs as a system service under a regular   |
+|   user account, it starts before that user logs in.  HID  |
+|   nodes are only granted to the user with an active local |
+|   session (udev "uaccess"), so at boot every HID device   |
+|   is denied and silently skipped.  Devices whose open was |
+|   denied are remembered here; a background watcher checks |
+|   them periodically and, as soon as access is granted     |
+|   (i.e. the user logs in), rescans and re-applies the     |
+|   active profile.                                         |
+\*---------------------------------------------------------*/
+static std::mutex               permission_denied_mutex;
+static std::set<std::string>    permission_denied_paths;
+static std::atomic<bool>        permission_watch_active(false);
+static std::atomic<bool>        permission_watch_stop(false);
+
+static const unsigned int       PERMISSION_WATCH_INTERVAL_MS    = 5000;
+static const unsigned int       PERMISSION_WATCH_SETTLE_MS      = 3000;
+
+static bool PermissionWatchSleep(unsigned int ms)
+{
+    for(unsigned int waited = 0; waited < ms; waited += 250)
+    {
+        if(permission_watch_stop)
+        {
+            return(false);
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    }
+
+    return(!permission_watch_stop);
+}
+
+static void PermissionWatchThreadFunction()
+{
+#ifdef __linux__
+    DebugTrace("[PERMWATCH] Watcher started, checking denied devices every %u ms", PERMISSION_WATCH_INTERVAL_MS);
+
+    unsigned int checks = 0;
+
+    while(PermissionWatchSleep(PERMISSION_WATCH_INTERVAL_MS))
+    {
+        std::vector<std::string> paths;
+
+        permission_denied_mutex.lock();
+        paths.assign(permission_denied_paths.begin(), permission_denied_paths.end());
+        permission_denied_mutex.unlock();
+
+        if(paths.empty())
+        {
+            DebugTrace("[PERMWATCH] No denied devices left, watcher stopping");
+            break;
+        }
+
+        checks++;
+
+        std::string granted_path;
+
+        for(const std::string& path : paths)
+        {
+            if(access(path.c_str(), F_OK) != 0)
+            {
+                /*-----------------------------------------*\
+                | Device node is gone (unplugged); stop     |
+                | watching it                               |
+                \*-----------------------------------------*/
+                DebugTrace("[PERMWATCH] %s no longer exists, removed from watch list", path.c_str());
+
+                permission_denied_mutex.lock();
+                permission_denied_paths.erase(path);
+                permission_denied_mutex.unlock();
+                continue;
+            }
+
+            if(access(path.c_str(), R_OK | W_OK) == 0)
+            {
+                granted_path = path;
+                break;
+            }
+        }
+
+        if(granted_path.empty())
+        {
+            /*---------------------------------------------*\
+            | Log only occasionally to keep the trace small |
+            \*---------------------------------------------*/
+            if(checks == 1 || (checks % 12) == 0)
+            {
+                DebugTrace("[PERMWATCH] Still no access to %zu device(s) after %u checks (waiting for login)", paths.size(), checks);
+            }
+
+            continue;
+        }
+
+        DebugTrace("[PERMWATCH] Access granted to %s, waiting %u ms for the remaining devices", granted_path.c_str(), PERMISSION_WATCH_SETTLE_MS);
+        LOG_INFO("[DetectionManager] Access to %s was granted (user logged in), rescanning devices", granted_path.c_str());
+
+        if(!PermissionWatchSleep(PERMISSION_WATCH_SETTLE_MS))
+        {
+            break;
+        }
+
+        /*-------------------------------------------------*\
+        | Remember the active profile before rescanning     |
+        \*-------------------------------------------------*/
+        std::string active_profile = ResourceManager::get()->GetProfileManager()->GetActiveProfile();
+
+        DebugTrace("[PERMWATCH] Starting rescan (active profile \"%s\")", active_profile.c_str());
+
+        /*-------------------------------------------------*\
+        | Allow the detection that is about to run to start |
+        | a new watcher if some devices are still denied    |
+        \*-------------------------------------------------*/
+        permission_watch_active = false;
+
+        ResourceManager::get()->RescanDevices();
+        DetectionManager::get()->WaitForDetection();
+
+        if(!active_profile.empty())
+        {
+            bool loaded = ResourceManager::get()->GetProfileManager()->LoadProfile(active_profile);
+
+            DebugTrace("[PERMWATCH] Re-applied profile \"%s\" after rescan: %s", active_profile.c_str(), loaded ? "OK" : "FAILED");
+            LOG_INFO("[DetectionManager] Re-applied profile \"%s\" after rescan: %s", active_profile.c_str(), loaded ? "OK" : "FAILED");
+        }
+        else
+        {
+            DebugTrace("[PERMWATCH] No active profile to re-apply after rescan");
+        }
+
+        return;
+    }
+
+    DebugTrace("[PERMWATCH] Watcher exiting");
+#endif
+
+    permission_watch_active = false;
+}
+
+static void PermissionWatchStartIfNeeded()
+{
+    std::size_t count;
+
+    permission_denied_mutex.lock();
+    count = permission_denied_paths.size();
+    permission_denied_mutex.unlock();
+
+    if(count == 0)
+    {
+        return;
+    }
+
+    bool expected = false;
+
+    if(!permission_watch_active.compare_exchange_strong(expected, true))
+    {
+        DebugTrace("[PERMWATCH] %zu device(s) denied, watcher already running", count);
+        return;
+    }
+
+    LOG_WARNING("[DetectionManager] %zu device(s) could not be opened (permission denied); will retry automatically when access is granted", count);
+    DebugTrace("[PERMWATCH] %zu device(s) denied, starting watcher", count);
+
+    std::thread(PermissionWatchThreadFunction).detach();
+}
 
 #ifdef __APPLE__
 #include <hidapi_darwin.h>
@@ -221,6 +391,11 @@ DetectionManager::DetectionManager()
 
 DetectionManager::~DetectionManager()
 {
+    /*-----------------------------------------------------*\
+    | Stop the permission watcher, if running               |
+    \*-----------------------------------------------------*/
+    permission_watch_stop = true;
+
     /*-----------------------------------------------------*\
     | Exit HID in background thread                         |
     \*-----------------------------------------------------*/
@@ -769,6 +944,10 @@ void DetectionManager::BackgroundDetectDevices()
     LOG_INFO("------------------------------------------------------");
 
     DebugTrace("[DETECTION] ==== Device detection started ====");
+
+    permission_denied_mutex.lock();
+    permission_denied_paths.clear();
+    permission_denied_mutex.unlock();
     DebugTraceHidrawScan("detection start");
 
     /*-----------------------------------------------------*\
@@ -948,6 +1127,12 @@ void DetectionManager::BackgroundDetectDevices()
     | Unlock detection mutex                                |
     \*-----------------------------------------------------*/
     DetectDevicesMutex.unlock();
+
+    /*-----------------------------------------------------*\
+    | If any device was denied (service started before the  |
+    | user logged in), watch for access and rescan later    |
+    \*-----------------------------------------------------*/
+    PermissionWatchStartIfNeeded();
 
 #ifdef __linux__
     /*-----------------------------------------------------*\
@@ -1618,6 +1803,19 @@ void DetectionManager::RunHIDDetector(hid_device_info* current_hid_device, json&
 
                     DebugTrace("[HID] Running detector \"%s\" on %s", detector->name.c_str(), current_hid_device->path ? current_hid_device->path : "(null)");
                     DebugTracePathAccess("HID", current_hid_device->path);
+
+#ifdef __linux__
+                    if(current_hid_device->path != nullptr
+                    && access(current_hid_device->path, R_OK | W_OK) != 0
+                    && errno == EACCES)
+                    {
+                        permission_denied_mutex.lock();
+                        permission_denied_paths.insert(std::string(current_hid_device->path));
+                        permission_denied_mutex.unlock();
+
+                        DebugTrace("[PERMWATCH] Permission denied for %s (%s), added to watch list", current_hid_device->path, detector->name.c_str());
+                    }
+#endif
 
                     DetectedControllers detected_controllers = detector->function(current_hid_device, detector->name);
 

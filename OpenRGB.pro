@@ -168,6 +168,7 @@ HEADERS +=                                                                      
     dependencies/json/nlohmann/json.hpp                                                         \
     fair_mutex.h                                                                                \
     JsonUtils.h                                                                                 \
+    DebugTrace.h                                                                                \
     LogManager.h                                                                                \
     NetworkClient.h                                                                             \
     NetworkProtocol.h                                                                           \
@@ -242,6 +243,7 @@ SOURCES +=                                                                      
     DetectionManager.cpp                                                                        \
     dmiinfo/dmiinfo.cpp                                                                         \
     JsonUtils.cpp                                                                               \
+    DebugTrace.cpp                                                                              \
     LogManager.cpp                                                                              \
     NetworkClient.cpp                                                                           \
     NetworkProtocol.cpp                                                                         \

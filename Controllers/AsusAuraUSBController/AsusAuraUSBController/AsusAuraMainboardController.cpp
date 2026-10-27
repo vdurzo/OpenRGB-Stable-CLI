@@ -11,6 +11,7 @@
 
 #include <cstring>
 #include "AsusAuraMainboardController.h"
+#include "DebugTrace.h"
 
 AuraMainboardController::AuraMainboardController(hid_device* dev_handle, const char* path, std::string dev_name) : AuraUSBController(dev_handle, path, dev_name), mode(AURA_MODE_DIRECT)
 {
@@ -20,6 +21,7 @@ AuraMainboardController::AuraMainboardController(hid_device* dev_handle, const c
     \*-----------------------------------------------------*/
     if(!config_table_valid)
     {
+        DebugTrace("[AURA] Mainboard \"%s\": config table invalid, skipping setup", dev_name.c_str());
         return;
     }
 
@@ -51,6 +53,17 @@ AuraMainboardController::AuraMainboardController(hid_device* dev_handle, const c
         effect_channel++;
     }
 
+    for(std::size_t i = 0; i < device_info.size(); i++)
+    {
+        DebugTrace("[AURA] Mainboard channel %zu: effect_channel=%u direct_channel=%u num_leds=%u rgb_headers=%u type=%s",
+                   i,
+                   device_info[i].effect_channel,
+                   device_info[i].direct_channel,
+                   device_info[i].num_leds,
+                   device_info[i].num_headers,
+                   (device_info[i].device_type == AuraDeviceType::FIXED) ? "FIXED" : "ADDRESSABLE");
+    }
+
     SetGen1();
 }
 
@@ -79,7 +92,7 @@ void AuraMainboardController::SetGen1()
     /*-----------------------------------------------------*\
     | Send packet                                           |
     \*-----------------------------------------------------*/
-    hid_write(dev, usb_buf, 65);
+    TracedWrite("SetGen1", usb_buf, 65);
 }
 
 void AuraMainboardController::SetChannelLEDs(unsigned char channel, RGBColor * colors, unsigned int num_colors)
@@ -181,7 +194,7 @@ void AuraMainboardController::SendEffect
     /*-----------------------------------------------------*\
     | Send packet                                           |
     \*-----------------------------------------------------*/
-    hid_write(dev, usb_buf, 65);
+    TracedWrite("effect", usb_buf, 65);
 }
 
 void AuraMainboardController::SendColor
@@ -218,7 +231,7 @@ void AuraMainboardController::SendColor
     /*-----------------------------------------------------*\
     | Send packet                                           |
     \*-----------------------------------------------------*/
-    hid_write(dev, usb_buf, 65);
+    TracedWrite("color", usb_buf, 65);
 }
 
 void AuraMainboardController::SendCommit()
@@ -240,5 +253,5 @@ void AuraMainboardController::SendCommit()
     /*-----------------------------------------------------*\
     | Send packet                                           |
     \*-----------------------------------------------------*/
-    hid_write(dev, usb_buf, 65);
+    TracedWrite("commit", usb_buf, 65);
 }

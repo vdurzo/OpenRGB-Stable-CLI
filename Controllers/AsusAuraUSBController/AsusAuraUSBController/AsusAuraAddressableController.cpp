@@ -92,5 +92,5 @@ void AuraAddressableController::SendEffect
     /*-----------------------------------------------------*\
     | Send packet                                           |
     \*-----------------------------------------------------*/
-    hid_write(dev, usb_buf, 65);
+    TracedWrite("effect", usb_buf, 65);
 }

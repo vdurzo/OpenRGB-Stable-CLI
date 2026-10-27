@@ -7,6 +7,7 @@
 |   SPDX-License-Identifier: GPL-2.0-or-later               |
 \*---------------------------------------------------------*/
 
+#include "DebugTrace.h"
 #include <chrono>
 #include <iomanip>
 #include <iostream>
@@ -362,6 +363,15 @@ void LogManager::LogEntry_message(PLogMessage message)
         {
             LogManagerCallbacks[idx](LogManagerCallbackArgs[idx], LOGMANAGER_UPDATE_REASON_LOG_ENTRY, message);
         }
+    }
+
+    /*-----------------------------------------------------*\
+    | Mirror every message up to DEBUG level into the       |
+    | always-on debug trace, regardless of log settings     |
+    \*-----------------------------------------------------*/
+    if(message->level <= LL_DEBUG || message->level == LL_DIALOG)
+    {
+        DebugTraceLogMessage(message->level, message->filename.c_str(), message->line, message->text);
     }
 
     /*-----------------------------------------------------*\

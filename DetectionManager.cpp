@@ -11,6 +11,7 @@
 \*---------------------------------------------------------*/
 
 #include <chrono>
+#include "DebugTrace.h"
 #include <cctype>
 #include <cstdio>
 #include <set>
@@ -23,12 +24,55 @@
 #include "SettingsManager.h"
 #include "StringUtils.h"
 
+/*---------------------------------------------------------*\
+| Debug trace helper: full identity and zone layout of a    |
+| controller                                                |
+\*---------------------------------------------------------*/
+static void DebugTraceController(const char* tag, RGBController* controller)
+{
+    if(controller == nullptr)
+    {
+        DebugTrace("[%s] controller is null", tag);
+        return;
+    }
+
+    std::string version = controller->GetVersion();
+    std::string serial  = controller->GetSerial();
+
+    DebugTrace("[%s] \"%s\" location=\"%s\" version=\"%s\" (hex %s) serial=\"%s\" flags=0x%08X modes=%u active_mode=%d (%s) zones=%u",
+               tag,
+               controller->GetName().c_str(),
+               controller->GetLocation().c_str(),
+               version.c_str(),
+               DebugHex((const unsigned char*)version.data(), version.size(), 32).c_str(),
+               serial.c_str(),
+               (unsigned int)controller->GetFlags(),
+               controller->GetModeCount(),
+               controller->GetActiveMode(),
+               (controller->GetActiveMode() >= 0 && (unsigned int)controller->GetActiveMode() < controller->GetModeCount()) ? controller->GetModeName((unsigned int)controller->GetActiveMode()).c_str() : "?",
+               controller->GetZoneCount());
+
+    for(unsigned int zone_idx = 0; zone_idx < controller->GetZoneCount(); zone_idx++)
+    {
+        DebugTrace("[%s]     zone %u \"%s\" type=%d leds=%u (min %u max %u) zone_flags=0x%08X",
+                   tag,
+                   zone_idx,
+                   controller->GetZoneName(zone_idx).c_str(),
+                   (int)controller->GetZoneType(zone_idx),
+                   controller->GetZoneLEDsCount(zone_idx),
+                   controller->GetZoneLEDsMin(zone_idx),
+                   controller->GetZoneLEDsMax(zone_idx),
+                   (unsigned int)controller->GetZoneFlags(zone_idx));
+    }
+}
+
 #ifdef __linux__
 #include <unistd.h>
 #endif
 
 #ifdef __APPLE__
 #include <hidapi_darwin.h>
+
 #endif
 
 using namespace std::chrono_literals;
@@ -471,12 +515,22 @@ void DetectionManager::RegisterRGBController(RGBController *rgb_controller, cons
     /*-----------------------------------------------------*\
     | Load manual configuration for the new controller      |
     \*-----------------------------------------------------*/
-    ResourceManager::get()->GetProfileManager()->LoadControllerConfiguration(rgb_controller);
+    DebugTrace("[REGISTER] Registering controller (detection_path=%s)", rgb_controller->detection_path.c_str());
+    DebugTraceController("REGISTER before saved config", rgb_controller);
+
+    bool config_loaded = ResourceManager::get()->GetProfileManager()->LoadControllerConfiguration(rgb_controller);
+
+    DebugTrace("[REGISTER] Saved configuration (manual zone sizes) applied: %s", config_loaded ? "YES" : "NO");
+    DebugTraceController("REGISTER after saved config", rgb_controller);
 
     /*-----------------------------------------------------*\
     | Load active profile for the new controller            |
     \*-----------------------------------------------------*/
-    ResourceManager::get()->GetProfileManager()->LoadControllerActiveProfile(rgb_controller);
+    bool active_profile_loaded = ResourceManager::get()->GetProfileManager()->LoadControllerActiveProfile(rgb_controller);
+
+    DebugTrace("[REGISTER] Active profile \"%s\" applied to this controller: %s",
+               ResourceManager::get()->GetProfileManager()->GetActiveProfile().c_str(),
+               active_profile_loaded ? "YES" : "NO");
 
     /*-----------------------------------------------------*\
     | Add the new controller to the list                    |
@@ -494,6 +548,7 @@ void DetectionManager::RegisterRGBController(RGBController *rgb_controller, cons
 void DetectionManager::UnregisterRGBController(RGBController* rgb_controller)
 {
     LOG_INFO("[%s] Unregistering RGB controller %s", DETECTIONMANAGER, rgb_controller->GetName().c_str());
+    DebugTraceController("UNREGISTER", rgb_controller);
 
     /*-----------------------------------------------------*\
     | Clear callbacks from the controller before removal    |
@@ -539,6 +594,8 @@ void DetectionManager::BeginDetection()
     | Perform pre-detection setup                           |
     \*-----------------------------------------------------*/
     bool detection_ready = ProcessPreDetection();
+
+    DebugTrace("[DETECTION] BeginDetection called, pre-detection ready=%s", detection_ready ? "YES" : "NO");
 
     /*-----------------------------------------------------*\
     | Run DetectDevices function in background thread if    |
@@ -711,6 +768,9 @@ void DetectionManager::BackgroundDetectDevices()
     LOG_INFO("|               Start device detection               |");
     LOG_INFO("------------------------------------------------------");
 
+    DebugTrace("[DETECTION] ==== Device detection started ====");
+    DebugTraceHidrawScan("detection start");
+
     /*-----------------------------------------------------*\
     | Start at 0% detection progress                        |
     \*-----------------------------------------------------*/
@@ -869,6 +929,15 @@ void DetectionManager::BackgroundDetectDevices()
     LOG_INFO("------------------------------------------------------");
     LOG_INFO("|                Detection completed                 |");
     LOG_INFO("------------------------------------------------------");
+
+    RGBControllersMutex.lock();
+    DebugTrace("[DETECTION] ==== Device detection completed: %zu controllers ====", rgb_controllers.size());
+
+    for(std::size_t controller_idx = 0; controller_idx < rgb_controllers.size(); controller_idx++)
+    {
+        DebugTraceController("DETECTION result", rgb_controllers[controller_idx]);
+    }
+    RGBControllersMutex.unlock();
 
     /*-----------------------------------------------------*\
     | Clear detection in progress flag                      |
@@ -1448,6 +1517,14 @@ void DetectionManager::BackgroundHIDInit()
 \*---------------------------------------------------------*/
 void DetectionManager::RunHIDDetector(hid_device_info* current_hid_device, json& detector_settings)
 {
+    DebugTrace("[HID] Device %04X:%04X usage_page=0x%04X usage=0x%04X interface=%d path=%s",
+               current_hid_device->vendor_id,
+               current_hid_device->product_id,
+               current_hid_device->usage_page,
+               current_hid_device->usage,
+               current_hid_device->interface_number,
+               current_hid_device->path ? current_hid_device->path : "(null)");
+
     if(LogManager::get()->GetLogLevel() >= LL_DEBUG)
     {
         const char* manu_name = StringUtils::wchar_to_char(current_hid_device->manufacturer_string);
@@ -1539,7 +1616,12 @@ void DetectionManager::RunHIDDetector(hid_device_info* current_hid_device, json&
 
                     SignalUpdate(DETECTIONMANAGER_UPDATE_REASON_DETECTION_PROGRESS_CHANGED);
 
+                    DebugTrace("[HID] Running detector \"%s\" on %s", detector->name.c_str(), current_hid_device->path ? current_hid_device->path : "(null)");
+                    DebugTracePathAccess("HID", current_hid_device->path);
+
                     DetectedControllers detected_controllers = detector->function(current_hid_device, detector->name);
+
+                    DebugTrace("[HID] Detector \"%s\" returned %zu controller(s)", detector->name.c_str(), detected_controllers.size());
 
                     for(std::size_t detected_controller_idx = 0; detected_controller_idx < detected_controllers.size(); detected_controller_idx++)
                     {

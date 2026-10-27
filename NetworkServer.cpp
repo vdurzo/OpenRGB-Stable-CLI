@@ -10,6 +10,7 @@
 \*---------------------------------------------------------*/
 
 #include <cstring>
+#include "DebugTrace.h"
 #include <queue>
 #include "i2c_smbus.h"
 #include "JsonUtils.h"
@@ -1098,6 +1099,9 @@ void NetworkServer::ControllerListenThread(NetworkServerControllerThread* this_t
                 this_thread->queue.pop();
                 this_thread->queue_mutex.unlock();
 
+                DebugTrace("[SERVER] controller request: packet id %u, device id %u, %u bytes",
+                           queue_entry.header.pkt_id, queue_entry.header.pkt_dev_id, queue_entry.header.pkt_size);
+
                 controller_ids_mutex.lock_shared();
 
                 switch(queue_entry.header.pkt_id)
@@ -1157,6 +1161,8 @@ void NetworkServer::ProfileManagerListenThread(NetworkServerControllerThread* th
             queue_entry = this_thread->queue.front();
             this_thread->queue.pop();
             this_thread->queue_mutex.unlock();
+
+            DebugTrace("[SERVER] profile request: packet id %u, %u bytes", queue_entry.header.pkt_id, queue_entry.header.pkt_size);
 
             switch(queue_entry.header.pkt_id)
             {
@@ -1298,6 +1304,8 @@ void NetworkServer::ListenThreadFunction(NetworkClientInfo* client_info)
         | Entire request received, select functionality     |
         | based on request ID                               |
         \*-------------------------------------------------*/
+        DebugTrace("[SERVER] client request: packet id %u, device id %u, %u bytes", header.pkt_id, header.pkt_dev_id, header.pkt_size);
+
         switch(header.pkt_id)
         {
         /*-------------------------------------------------*\
@@ -1354,6 +1362,7 @@ void NetworkServer::ListenThreadFunction(NetworkClientInfo* client_info)
                 break;
 
             case NET_PACKET_ID_REQUEST_RESCAN_DEVICES:
+                DebugTrace("[SERVER] Client requested a RESCAN of devices");
                 status = ProcessRequest_RescanDevices();
                 break;
 

@@ -13,6 +13,7 @@
 #include "AsusAuraUSBController.h"
 #include "LogManager.h"
 #include "StringUtils.h"
+#include "DebugTrace.h"
 
 AuraUSBController::AuraUSBController(hid_device* dev_handle, const char* path, std::string dev_name)
 {
@@ -30,8 +31,34 @@ AuraUSBController::AuraUSBController(hid_device* dev_handle, const char* path, s
     memset(config_table, 0x00, sizeof(config_table));
     memset(version,      0x00, sizeof(version));
 
+    DebugTrace("[AURA] Controller init \"%s\" on %s", name.c_str(), location.c_str());
+
     GetFirmwareVersion();
     GetConfigTable();
+
+    DebugTrace("[AURA] Controller init done \"%s\": firmware=\"%s\" config_table_valid=%s",
+               name.c_str(), GetDeviceVersion().c_str(), config_table_valid ? "YES" : "NO");
+}
+
+int AuraUSBController::TracedWrite(const char* what, const unsigned char* buf, size_t len)
+{
+    int ret = hid_write(dev, buf, len);
+
+    if(ret < 0)
+    {
+        const wchar_t* err = hid_error(dev);
+
+        DebugTrace("[AURA] %s write FAILED ret=%d error=\"%s\" data=%s",
+                   what, ret,
+                   err ? StringUtils::wstring_to_string(std::wstring(err)).c_str() : "(none)",
+                   DebugHex(buf, len, 16).c_str());
+    }
+    else
+    {
+        DebugTrace("[AURA] %s write ok ret=%d data=%s", what, ret, DebugHex(buf, len, 16).c_str());
+    }
+
+    return(ret);
 }
 
 AuraUSBController::~AuraUSBController()
@@ -102,13 +129,22 @@ bool AuraUSBController::SendRequestAndReadReply
         | replies can be queued and would otherwise be read |
         | as the answer to this request                     |
         \*-------------------------------------------------*/
+        int drained_count = 0;
+
         for(int drained = 0; drained < 32; drained++)
         {
-            if(hid_read_timeout(dev, usb_buf, sizeof(usb_buf), 0) <= 0)
+            int drained_bytes = hid_read_timeout(dev, usb_buf, sizeof(usb_buf), 0);
+
+            if(drained_bytes <= 0)
             {
                 break;
             }
+
+            drained_count++;
+            DebugTrace("[AURA] request 0x%02X attempt %d: drained stale report: %s", request, attempt + 1, DebugHex(usb_buf, (size_t)drained_bytes, 16).c_str());
         }
+
+        DebugTrace("[AURA] request 0x%02X attempt %d of %d (expect reply 0x%02X), drained %d stale report(s)", request, attempt + 1, max_attempts, expected_reply, drained_count);
 
         /*-------------------------------------------------*\
         | Send the request                                  |
@@ -118,7 +154,7 @@ bool AuraUSBController::SendRequestAndReadReply
         usb_buf[0x00]   = 0xEC;
         usb_buf[0x01]   = request;
 
-        if(hid_write(dev, usb_buf, sizeof(usb_buf)) < 0)
+        if(TracedWrite("request", usb_buf, sizeof(usb_buf)) < 0)
         {
             LOG_WARNING("[%s] Aura USB request 0x%02X: write failed (attempt %d)", name.c_str(), request, attempt + 1);
             continue;
@@ -135,15 +171,29 @@ bool AuraUSBController::SendRequestAndReadReply
 
             int bytes = hid_read_timeout(dev, reply_buf, 65, read_timeout_ms);
 
-            if(bytes <= 0)
+            if(bytes < 0)
             {
+                const wchar_t* err = hid_error(dev);
+                DebugTrace("[AURA] request 0x%02X read %d: FAILED ret=%d error=\"%s\"", request, reads + 1, bytes,
+                           err ? StringUtils::wstring_to_string(std::wstring(err)).c_str() : "(none)");
                 break;
             }
 
+            if(bytes == 0)
+            {
+                DebugTrace("[AURA] request 0x%02X read %d: timeout after %d ms, no reply", request, reads + 1, read_timeout_ms);
+                break;
+            }
+
+            DebugTrace("[AURA] request 0x%02X read %d: %d bytes: %s", request, reads + 1, bytes, DebugHex(reply_buf, (size_t)bytes, 64).c_str());
+
             if(reply_buf[1] == expected_reply)
             {
+                DebugTrace("[AURA] request 0x%02X: valid reply 0x%02X accepted", request, expected_reply);
                 return(true);
             }
+
+            DebugTrace("[AURA] request 0x%02X: ignored reply 0x%02X (not the expected 0x%02X)", request, reply_buf[1], expected_reply);
         }
 
         LOG_WARNING("[%s] Aura USB request 0x%02X: no valid reply (attempt %d of %d)", name.c_str(), request, attempt + 1, max_attempts);
@@ -165,6 +215,10 @@ void AuraUSBController::GetConfigTable()
     {
         memcpy(config_table, &usb_buf[4], 60);
         config_table_valid = true;
+
+        DebugTrace("[AURA] Config table: %s", DebugHex(config_table, 60, 60).c_str());
+        DebugTrace("[AURA] Config table: addressable headers=%u, mainboard LEDs=%u, RGB headers=%u",
+                   config_table[0x02], config_table[0x1B], config_table[0x1D]);
 
         LOG_DEBUG("[%s] ASUS Aura USB config table:", GetDeviceVersion().c_str());
 
@@ -189,6 +243,7 @@ void AuraUSBController::GetConfigTable()
         | IsConfigTableValid() and discards the device.     |
         \*-------------------------------------------------*/
         LOG_ERROR("[%s] Could not read config table, can not add device", name.c_str());
+        DebugTrace("[AURA] Config table read FAILED for \"%s\" - device will be discarded", name.c_str());
     }
 }
 
@@ -200,10 +255,13 @@ void AuraUSBController::GetFirmwareVersion()
     {
         memcpy(version, &usb_buf[2], 16);
         version[16] = '\0';
+
+        DebugTrace("[AURA] Firmware version raw: %s -> \"%s\"", DebugHex(&usb_buf[2], 16, 16).c_str(), GetDeviceVersion().c_str());
     }
     else
     {
         LOG_ERROR("[%s] Could not read firmware version", name.c_str());
+        DebugTrace("[AURA] Firmware version read FAILED for \"%s\" - version string stays empty", name.c_str());
     }
 }
 
@@ -258,7 +316,7 @@ void AuraUSBController::SendDirect
         /*-----------------------------------------------------*\
         | Send packet                                           |
         \*-----------------------------------------------------*/
-        hid_write(dev, usb_buf, 65);
+        TracedWrite("direct", usb_buf, 65);
 
         offset += sent_led_count;
     }

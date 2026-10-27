@@ -109,6 +109,12 @@ protected:
         RGBColor *      colors
         );
 
+    /*-----------------------------------------------------*\
+    | hid_write wrapper that records every packet and its   |
+    | result in the debug trace                             |
+    \*-----------------------------------------------------*/
+    int TracedWrite(const char* what, const unsigned char* buf, size_t len);
+
 private:
     void GetConfigTable();
     void GetFirmwareVersion();

@@ -7,6 +7,7 @@
 |   SPDX-License-Identifier: GPL-2.0-or-later               |
 \*---------------------------------------------------------*/
 
+#include "DebugTrace.h"
 #include "cli.h"
 #include "DetectionManager.h"
 #include "ResourceManager.h"
@@ -67,6 +68,12 @@ void WaitWhileServerOnline(NetworkServer* srv)
 \*---------------------------------------------------------*/
 int main(int argc, char* argv[])
 {
+    /*-----------------------------------------------------*\
+    | Always-on diagnostic trace: process, session and HID  |
+    | permission state at startup                           |
+    \*-----------------------------------------------------*/
+    DebugTraceStartup(argc, argv);
+
     /*-----------------------------------------------------*\
     | Mac x86/x64 only - Install SMBus Driver macUSPCIO     |
     \*-----------------------------------------------------*/

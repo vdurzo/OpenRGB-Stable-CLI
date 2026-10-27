@@ -9,6 +9,7 @@
 |   SPDX-License-Identifier: GPL-2.0-or-later               |
 \*---------------------------------------------------------*/
 
+#include "DebugTrace.h"
 #include <fstream>
 #include <iostream>
 #include <cstring>
@@ -455,6 +456,8 @@ bool ProfileManager::LoadProfile(std::string profile_name)
 {
     if(ResourceManager::get()->IsLocalClient() && (ResourceManager::get()->GetLocalClient()->GetSupportsProfileManagerAPI()))
     {
+        DebugTrace("[PROFILE] LoadProfile(\"%s\"): local client, forwarding request to the server", profile_name.c_str());
+
         ResourceManager::get()->GetLocalClient()->ProfileManager_LoadProfile(profile_name);
 
         return(true);
@@ -1293,6 +1296,56 @@ bool ProfileManager::LoadAutoProfile(std::string setting_name)
     }
 }
 
+/*---------------------------------------------------------*\
+| Debug trace: explain why a saved controller entry does    |
+| not match a live controller                               |
+\*---------------------------------------------------------*/
+static std::string DebugTraceMismatchReasons(RGBController* saved_controller, RGBController* live_controller)
+{
+    std::string reasons;
+
+    if(saved_controller->GetDeviceType() != live_controller->GetDeviceType())
+    {
+        reasons += " type(" + std::to_string((int)saved_controller->GetDeviceType()) + " vs " + std::to_string((int)live_controller->GetDeviceType()) + ")";
+    }
+
+    if(saved_controller->GetName() != live_controller->GetName())
+    {
+        reasons += " name(\"" + saved_controller->GetName() + "\" vs \"" + live_controller->GetName() + "\")";
+    }
+
+    if(saved_controller->GetDescription() != live_controller->GetDescription())
+    {
+        reasons += " description(\"" + saved_controller->GetDescription() + "\" vs \"" + live_controller->GetDescription() + "\")";
+    }
+
+    if(saved_controller->GetVersion() != live_controller->GetVersion())
+    {
+        std::string saved_version = saved_controller->GetVersion();
+        std::string live_version  = live_controller->GetVersion();
+
+        reasons += " version(" + DebugHex((const unsigned char*)saved_version.data(), saved_version.size(), 32)
+                 + " vs " + DebugHex((const unsigned char*)live_version.data(), live_version.size(), 32) + ")";
+    }
+
+    if(saved_controller->GetSerial() != live_controller->GetSerial())
+    {
+        reasons += " serial(\"" + saved_controller->GetSerial() + "\" vs \"" + live_controller->GetSerial() + "\")";
+    }
+
+    if(saved_controller->GetLocation() != live_controller->GetLocation())
+    {
+        reasons += " location(\"" + saved_controller->GetLocation() + "\" vs \"" + live_controller->GetLocation() + "\")";
+    }
+
+    if(reasons.empty())
+    {
+        reasons = " none";
+    }
+
+    return(reasons);
+}
+
 bool ProfileManager::SavedControllerMatches
     (
     RGBController*  saved_controller,
@@ -1364,6 +1417,7 @@ RGBController* ProfileManager::FindSavedController
     {
         if(SavedControllerMatches(saved_controllers[saved_idx], live_controller, true))
         {
+            DebugTrace("[PROFILE] Saved entry %zu of %zu matches \"%s\" exactly", saved_idx + 1, saved_controllers.size(), live_controller->GetName().c_str());
             return(saved_controllers[saved_idx]);
         }
     }
@@ -1388,8 +1442,21 @@ RGBController* ProfileManager::FindSavedController
         }
     }
 
+    if(candidate_count != 1)
+    {
+        DebugTrace("[PROFILE] No saved entry for \"%s\" (%s); %zu saved entries, %u version-insensitive candidates. Differences per saved entry:",
+                   live_controller->GetName().c_str(), live_controller->GetLocation().c_str(), saved_controllers.size(), candidate_count);
+
+        for(std::size_t saved_idx = 0; saved_idx < saved_controllers.size(); saved_idx++)
+        {
+            DebugTrace("[PROFILE]     saved %zu \"%s\":%s", saved_idx + 1, saved_controllers[saved_idx]->GetName().c_str(),
+                       DebugTraceMismatchReasons(saved_controllers[saved_idx], live_controller).c_str());
+        }
+    }
+
     if(candidate_count == 1)
     {
+        DebugTrace("[PROFILE] Using saved entry for \"%s\" ignoring version difference", live_controller->GetName().c_str());
         LOG_INFO("[ProfileManager] Using saved data for %s despite version mismatch (saved \"%s\", detected \"%s\")",
                  live_controller->GetName().c_str(),
                  candidate->GetVersion().c_str(),
@@ -1412,6 +1479,10 @@ bool ProfileManager::LoadControllerFromListWithOptions
     /*-----------------------------------------------------*\
     | Find the saved entry for this device                  |
     \*-----------------------------------------------------*/
+    DebugTrace("[PROFILE] Load for \"%s\" (%s): configuration=%s state=%s, %zu saved entries",
+               load_controller->GetName().c_str(), load_controller->GetLocation().c_str(),
+               load_configuration ? "YES" : "NO", load_state ? "YES" : "NO", profile_controllers.size());
+
     RGBController* profile_controller = FindSavedController(profile_controllers, load_controller);
 
     if(profile_controller != NULL)
@@ -1433,6 +1504,12 @@ bool ProfileManager::LoadControllerFromListWithOptions
             /*-----------------------------------------*\
             | Load zone configuration                   |
             \*-----------------------------------------*/
+            if(profile_controller->zones.size() != load_controller->zones.size())
+            {
+                DebugTrace("[PROFILE]     zone count differs (saved %zu, live %zu): zone sizes NOT applied",
+                           profile_controller->zones.size(), load_controller->zones.size());
+            }
+
             if(profile_controller->zones.size() == load_controller->zones.size())
             {
                 for(unsigned int zone_idx = 0; zone_idx < (unsigned int)profile_controller->zones.size(); zone_idx++)
@@ -1465,7 +1542,13 @@ bool ProfileManager::LoadControllerFromListWithOptions
                     &&                      (profile_controller->GetZoneLEDsMin(zone_idx)   == load_controller->GetZoneLEDsMin(zone_idx)  )
                     &&                      (profile_controller->GetZoneLEDsMax(zone_idx)   == load_controller->GetZoneLEDsMax(zone_idx)  ))
                     {
+                        unsigned int leds_before = load_controller->GetZoneLEDsCount(zone_idx);
+
                         load_controller->ConfigureZone(zone_idx, profile_controller->zones[zone_idx]);
+
+                        DebugTrace("[PROFILE]     zone %u \"%s\": size %u -> %u (saved %u)", zone_idx,
+                                   load_controller->GetZoneName(zone_idx).c_str(), leds_before,
+                                   load_controller->GetZoneLEDsCount(zone_idx), profile_controller->GetZoneLEDsCount(zone_idx));
 
                         if(profile_controller->GetZoneFlags(zone_idx) & ZONE_FLAG_MANUALLY_CONFIGURED_SEGMENTS)
                         {
@@ -1534,8 +1617,16 @@ bool ProfileManager::LoadControllerFromListWithOptions
                 }
             }
 
+            DebugTrace("[PROFILE]     saved active mode %d (%s) -> live mode %d (%s), found=%s",
+                       profile_controller->active_mode,
+                       (profile_controller->active_mode >= 0 && (std::size_t)profile_controller->active_mode < profile_controller->modes.size()) ? profile_controller->GetModeName((unsigned int)profile_controller->active_mode).c_str() : "?",
+                       load_controller->active_mode,
+                       (load_controller->active_mode >= 0 && (std::size_t)load_controller->active_mode < load_controller->modes.size()) ? load_controller->GetModeName((unsigned int)load_controller->active_mode).c_str() : "?",
+                       active_mode_found ? "YES" : "NO");
+
             if(active_mode_found)
             {
+                DebugTrace("[PROFILE]     UpdateMode() sent to device");
                 load_controller->UpdateMode();
             }
             else
@@ -1546,6 +1637,15 @@ bool ProfileManager::LoadControllerFromListWithOptions
             /*-----------------------------------------*\
             | If color list matches, load all colors    |
             \*-----------------------------------------*/
+            DebugTrace("[PROFILE]     LED colors: saved %zu, live %zu -> %s",
+                       profile_controller->colors.size(), load_controller->colors.size(),
+                       (profile_controller->colors.size() == load_controller->colors.size()) ? "applied (UpdateLEDs sent)" : "NOT applied (count differs)");
+
+            if(profile_controller->colors.size() > 0)
+            {
+                DebugTrace("[PROFILE]     first saved color 0x%06X", (unsigned int)profile_controller->colors[0]);
+            }
+
             if(profile_controller->colors.size() == load_controller->colors.size())
             {
                 for(unsigned int color_index = 0; color_index < (unsigned int)profile_controller->colors.size(); color_index++)
@@ -1610,6 +1710,9 @@ bool ProfileManager::LoadControllerFromListWithOptions
     | this controller, apply the base color if it is        |
     | enabled                                               |
     \*-----------------------------------------------------*/
+    DebugTrace("[PROFILE]     no saved entry used for \"%s\"%s", load_controller->GetName().c_str(),
+               (load_state && active_base_color_enabled) ? ", applying base color" : "");
+
     if(load_state && active_base_color_enabled)
     {
         load_controller->SetCustomMode();
@@ -1661,6 +1764,23 @@ bool ProfileManager::LoadProfileWithOptions
     \*-------------------------------------------------*/
     active_rgb_controllers = GetControllerListFromProfileJson(profile_json);
 
+    DebugTrace("[PROFILE] ==== Loading profile \"%s\" (configuration=%s state=%s): %zu saved entries in profile, json %s ====",
+               profile_name.c_str(), load_configuration ? "YES" : "NO", load_state ? "YES" : "NO",
+               active_rgb_controllers.size(), profile_json.is_null() ? "EMPTY/NOT FOUND" : "ok");
+
+    for(std::size_t saved_idx = 0; saved_idx < active_rgb_controllers.size(); saved_idx++)
+    {
+        std::string saved_version = active_rgb_controllers[saved_idx]->GetVersion();
+
+        DebugTrace("[PROFILE]     saved %zu: \"%s\" location=\"%s\" version hex %s serial=\"%s\" zones=%u",
+                   saved_idx + 1,
+                   active_rgb_controllers[saved_idx]->GetName().c_str(),
+                   active_rgb_controllers[saved_idx]->GetLocation().c_str(),
+                   DebugHex((const unsigned char*)saved_version.data(), saved_version.size(), 32).c_str(),
+                   active_rgb_controllers[saved_idx]->GetSerial().c_str(),
+                   active_rgb_controllers[saved_idx]->GetZoneCount());
+    }
+
     /*-------------------------------------------------*\
     | Load the base color data for this profile into    |
     | the active profile data                           |
@@ -1699,6 +1819,9 @@ bool ProfileManager::LoadProfileWithOptions
     \*-------------------------------------------------*/
     std::vector<RGBController *> controllers = ResourceManager::get()->GetRGBControllers();
 
+    DebugTrace("[PROFILE] %zu live devices to apply the profile to, base color %s",
+               controllers.size(), active_base_color_enabled ? "enabled" : "disabled");
+
     /*-------------------------------------------------*\
     | Loop through all controllers.  For each           |
     | controller, search all saved controllers until a  |
@@ -1721,6 +1844,8 @@ bool ProfileManager::LoadProfileWithOptions
                         active_base_color_enabled ? ", base color used instead" : "");
         }
     }
+
+    DebugTrace("[PROFILE] ==== Profile \"%s\" applied to %u of %zu live devices ====", profile_name.c_str(), matched_controllers, controllers.size());
 
     LOG_INFO("[ProfileManager] Profile \"%s\": applied to %u of %u devices",
              profile_name.c_str(),

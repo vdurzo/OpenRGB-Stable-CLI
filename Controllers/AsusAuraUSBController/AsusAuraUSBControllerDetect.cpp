@@ -36,6 +36,38 @@
 #include "RGBController_AsusAuraMonitor.h"
 #include "RGBController_AsusAuraRyuoAIO.h"
 #include "dmiinfo.h"
+#include "DebugTrace.h"
+#include "StringUtils.h"
+#include <cerrno>
+#include <cstring>
+
+/*---------------------------------------------------------*\
+| Open a HID path and record the result in the debug trace  |
+\*---------------------------------------------------------*/
+static hid_device* AuraTracedOpen(const char* detector, hid_device_info* info)
+{
+    errno = 0;
+
+    hid_device* dev     = hid_open_path(info->path);
+    int         err     = errno;
+
+    if(dev)
+    {
+        DebugTrace("[AURA DETECT] %s: opened %s (%04X:%04X)", detector, info->path, info->vendor_id, info->product_id);
+    }
+    else
+    {
+        const wchar_t* hid_err = hid_error(NULL);
+
+        DebugTrace("[AURA DETECT] %s: FAILED to open %s (%04X:%04X): errno=%d (%s) hidapi=\"%s\"",
+                   detector, info->path, info->vendor_id, info->product_id,
+                   err, strerror(err),
+                   hid_err ? StringUtils::wstring_to_string(std::wstring(hid_err)).c_str() : "(none)");
+        DebugTracePathAccess("AURA DETECT", info->path);
+    }
+
+    return(dev);
+}
 
 #define AURA_USB_VID                                        0x0B05
 
@@ -149,7 +181,7 @@ DetectedControllers DetectAsusAuraUSBTerminal(hid_device_info* info, const std::
     DetectedControllers detected_controllers;
     hid_device*         dev;
 
-    dev = hid_open_path(info->path);
+    dev = AuraTracedOpen("DetectAsusAuraUSBTerminal", info);
 
     if(dev)
     {
@@ -164,6 +196,7 @@ DetectedControllers DetectAsusAuraUSBTerminal(hid_device_info* info, const std::
             | destructor closes the HID handle.  A rescan   |
             | retries detection.                            |
             \*---------------------------------------------*/
+            DebugTrace("[AURA DETECT] Discarding controller on %s: config table not read", info->path);
             delete controller;
             return(detected_controllers);
         }
@@ -181,7 +214,7 @@ DetectedControllers DetectAsusAuraUSBAddressable(hid_device_info* info, const st
     DetectedControllers detected_controllers;
     hid_device*         dev;
 
-    dev = hid_open_path(info->path);
+    dev = AuraTracedOpen("DetectAsusAuraUSBAddressable", info);
 
     if(dev)
     {
@@ -197,6 +230,7 @@ DetectedControllers DetectAsusAuraUSBAddressable(hid_device_info* info, const st
             | destructor closes the HID handle.  A rescan   |
             | retries detection.                            |
             \*---------------------------------------------*/
+            DebugTrace("[AURA DETECT] Discarding controller on %s: config table not read", info->path);
             delete controller;
             return(detected_controllers);
         }
@@ -214,7 +248,7 @@ DetectedControllers DetectAsusAuraUSBMotherboards(hid_device_info* info, const s
     DetectedControllers detected_controllers;
     hid_device*         dev;
 
-    dev = hid_open_path(info->path);
+    dev = AuraTracedOpen("DetectAsusAuraUSBMotherboards", info);
 
     if(dev)
     {
@@ -232,6 +266,7 @@ DetectedControllers DetectAsusAuraUSBMotherboards(hid_device_info* info, const s
                 | destructor closes the HID handle.  A rescan   |
                 | retries detection.                            |
                 \*---------------------------------------------*/
+                DebugTrace("[AURA DETECT] Discarding controller on %s: config table not read", info->path);
                 delete controller;
                 return(detected_controllers);
             }

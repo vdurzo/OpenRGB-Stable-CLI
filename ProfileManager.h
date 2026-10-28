@@ -195,7 +195,8 @@ private:
                                     (
                                     RGBController*  saved_controller,
                                     RGBController*  live_controller,
-                                    bool            check_version
+                                    bool            check_version,
+                                    bool            check_serial = true
                                     );
 
     static RGBController*       FindSavedController

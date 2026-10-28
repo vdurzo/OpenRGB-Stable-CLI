@@ -1350,7 +1350,8 @@ bool ProfileManager::SavedControllerMatches
     (
     RGBController*  saved_controller,
     RGBController*  live_controller,
-    bool            check_version
+    bool            check_version,
+    bool            check_serial
     )
 {
     /*---------------------------------------------------------*\
@@ -1399,7 +1400,7 @@ bool ProfileManager::SavedControllerMatches
          &&(!check_device_name || (saved_controller->GetName()          == live_controller->GetName()       ))
          &&                       (saved_controller->GetDescription()   == live_controller->GetDescription())
          &&(!check_version     || (saved_controller->GetVersion()       == live_controller->GetVersion()    ))
-         &&                       (saved_controller->GetSerial()        == live_controller->GetSerial()     )
+         &&(!check_serial      || (saved_controller->GetSerial()        == live_controller->GetSerial()     ))
          &&                       (location_check                       == true                             ));
 }
 
@@ -1442,18 +1443,6 @@ RGBController* ProfileManager::FindSavedController
         }
     }
 
-    if(candidate_count != 1)
-    {
-        DebugTrace("[PROFILE] No saved entry for \"%s\" (%s); %zu saved entries, %u version-insensitive candidates. Differences per saved entry:",
-                   live_controller->GetName().c_str(), live_controller->GetLocation().c_str(), saved_controllers.size(), candidate_count);
-
-        for(std::size_t saved_idx = 0; saved_idx < saved_controllers.size(); saved_idx++)
-        {
-            DebugTrace("[PROFILE]     saved %zu \"%s\":%s", saved_idx + 1, saved_controllers[saved_idx]->GetName().c_str(),
-                       DebugTraceMismatchReasons(saved_controllers[saved_idx], live_controller).c_str());
-        }
-    }
-
     if(candidate_count == 1)
     {
         DebugTrace("[PROFILE] Using saved entry for \"%s\" ignoring version difference", live_controller->GetName().c_str());
@@ -1463,6 +1452,51 @@ RGBController* ProfileManager::FindSavedController
                  live_controller->GetVersion().c_str());
 
         return(candidate);
+    }
+
+    /*-----------------------------------------------------*\
+    | Otherwise accept a match that only differs in the     |
+    | serial string, again only if it is unambiguous.  Some |
+    | devices (e.g. ASUS ROG Azoth) report a serial with    |
+    | trailing garbage bytes that change between reads, so  |
+    | the saved serial never matches again and the profile  |
+    | silently skips the device                             |
+    \*-----------------------------------------------------*/
+    RGBController*  serial_candidate        = NULL;
+    unsigned int    serial_candidate_count  = 0;
+
+    for(std::size_t saved_idx = 0; saved_idx < saved_controllers.size(); saved_idx++)
+    {
+        if(SavedControllerMatches(saved_controllers[saved_idx], live_controller, true, false))
+        {
+            serial_candidate = saved_controllers[saved_idx];
+            serial_candidate_count++;
+        }
+    }
+
+    if(serial_candidate_count == 1)
+    {
+        DebugTrace("[PROFILE] Using saved entry for \"%s\" ignoring serial difference (saved \"%s\", detected \"%s\")",
+                   live_controller->GetName().c_str(),
+                   serial_candidate->GetSerial().c_str(),
+                   live_controller->GetSerial().c_str());
+        LOG_INFO("[ProfileManager] Using saved data for %s despite serial mismatch (saved \"%s\", detected \"%s\")",
+                 live_controller->GetName().c_str(),
+                 serial_candidate->GetSerial().c_str(),
+                 live_controller->GetSerial().c_str());
+
+        return(serial_candidate);
+    }
+
+    {
+        DebugTrace("[PROFILE] No saved entry for \"%s\" (%s); %zu saved entries, %u version-insensitive and %u serial-insensitive candidates. Differences per saved entry:",
+                   live_controller->GetName().c_str(), live_controller->GetLocation().c_str(), saved_controllers.size(), candidate_count, serial_candidate_count);
+
+        for(std::size_t saved_idx = 0; saved_idx < saved_controllers.size(); saved_idx++)
+        {
+            DebugTrace("[PROFILE]     saved %zu \"%s\":%s", saved_idx + 1, saved_controllers[saved_idx]->GetName().c_str(),
+                       DebugTraceMismatchReasons(saved_controllers[saved_idx], live_controller).c_str());
+        }
     }
 
     return(NULL);
